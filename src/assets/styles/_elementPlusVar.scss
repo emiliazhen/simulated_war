@@ -1,0 +1,49 @@
+// 只需要重写你需要的即可
+@forward 'element-plus/theme-chalk/src/common/var.scss' with (
+  $colors: (
+    'white': #ffffff,
+    'black': #000000,
+    'primary': (
+      'base': #0064d9,
+    ),
+    'success': (
+      'base': #52c41a,
+    ),
+    'danger': (
+      'base': #d63349,
+    ),
+    'error': (
+      'base': #df2121,
+    ),
+    'info': (
+      'base': #a4a8ad,
+    ),
+  ),
+  $font-size: (
+    'base': 20px,
+  ),
+  // $empty: (
+  // 	'fill-color-0': #94bfe3,
+  // 	'fill-color-1': #234d6e,
+  // 	'fill-color-2': #336085,
+  // 	'fill-color-3': #031320,
+  // 	'fill-color-4': #042036,
+  // 	'fill-color-5': #0e3452,
+  // 	'fill-color-6': #03233d,
+  // 	'fill-color-7': #0f2d44,
+  // 	'fill-color-8': #010f1a,
+  // 	'fill-color-9': #03233d,
+  // ),
+  $border-color:
+    (
+      '': #dcdfe6,
+      'light': #e4e7ed,
+      'lighter': #ebeef5,
+      'extra-light': #f2f6fc,
+      'dark': #d4d7de,
+      'darker': #cdd0d6,
+    )
+);
+
+// 导入所有样式:
+@use 'element-plus/theme-chalk/src/index.scss' as *;
