@@ -9,6 +9,7 @@
   <div class="select-box" v-show="menuObject.isShowSelectBox" ref="entitySelectRef"></div>
   <div class="attack-lock-box" v-show="lockObject.isShow" ref="attackLockRef"></div>
   <div class="lock-tip" v-show="lockObject.isShow">点击敌对单位锁定目标 · ESC 取消</div>
+  <div class="lock-tip" v-show="movePickActive">点击地图选择移动目标点 · ESC 取消</div>
   <transition name="result-fade">
     <div v-if="battleResult" class="battle-result" :class="battleResult">
       <p class="result-title">{{ battleResult === 'win' ? '胜利' : '失败' }}</p>
@@ -65,6 +66,16 @@ import HeatMap from '@/utils/heatmap.js'
 import { toFixed } from '@/utils/index'
 import { useRem } from '@/hooks/rem'
 import { FACTION_THEME } from '@/mock/forces'
+import { applyClockPaused, applyClockSpeed, initSimClock, simSeconds as clockSimSeconds, SPEED_OPTIONS } from '@/sim/clock'
+import { createMoveController, freezeEntityTo } from '@/sim/move'
+import { pushSimEvent, registerLogUnit, resetBattleLog } from '@/sim/eventLog'
+import { createPatrolController } from '@/sim/patrol'
+import { updateSharedVision } from '@/sim/vision'
+import { createWindField } from '@/sim/wind'
+import { fireBullet as spawnBullet, updateBullets as tickBullets, updateLocks as tickLocks, type BulletMeta, type LockState } from '@/sim/combat'
+import { playExplosion as spawnExplosion } from '@/sim/fx'
+import { attachRadarSweep } from '@/sim/radar'
+import { getScreenBoundingBox as screenBoxOf, isClickOnBillboard as hitBillboard, nearestSelectableOnScreen, pickGlobeCartesian as pickGlobe } from '@/sim/pick'
 
 const { designPxToRealPx } = useRem()
 const emit = defineEmits(['selectedEntityChange', 'battleUpdate', 'battleReport'])
@@ -99,22 +110,48 @@ const mainPointList = [
   { label: '青岛', latitude: 36.094406, longitude: 120.369557 },
   { label: '大连', latitude: 38.71459, longitude: 121.118622 },
 ];
-// Token
-Cesium.Ion.defaultAccessToken =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIwMDlhNmM4MC02Yzk5LTQ3Y2UtYmIyMy1iZmM3NWViNWE0YTYiLCJpZCI6MTg4OTA2LCJpYXQiOjE3MDQ4NzMxMDl9.Ia9jjPeYwBT53v_eDiXNdXrOsT30uxbBh7hWlxqYHHM';
+Cesium.Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN || ''
 Cesium.Camera.DEFAULT_VIEW_RECTANGLE = Cesium.Rectangle.fromDegrees(89.5, 20.4, 110.4, 61.2);
 
 let viewer: Cesium.Viewer | null = null;
 let handler: Cesium.ScreenSpaceEventHandler | null = null
 let selectedEntry: any = null
 const attackLineMap = new Map()
-const moveTrackMap = new Map<string, { solidLineId: string; dashedLineId: string; tickHandler: (clock: Cesium.Clock) => void }>()
+const moveTrackMap = new Map<string, { solidLineId: string; dashedLineId: string }>()
+const movePickActive = ref(false)
+let moveEscHandlerRef: ((e: KeyboardEvent) => void) | null = null
+const moveController = createMoveController()
+const patrolController = createPatrolController()
+const windField = createWindField()
+const lastVisionSim = { value: -1 }
+let simPaused = false
+let entryStartJulian: Cesium.JulianDate | null = null
+
+function simSeconds(time?: Cesium.JulianDate) {
+  if (!viewer) return 0
+  return clockSimSeconds(viewer.clock, time)
+}
+
+function poseFromCartesian(pos?: Cesium.Cartesian3) {
+  if (!pos) return undefined
+  const c = Cesium.Cartographic.fromCartesian(pos)
+  return {
+    lng: Cesium.Math.toDegrees(c.longitude),
+    lat: Cesium.Math.toDegrees(c.latitude),
+    height: Number.isFinite(c.height) ? c.height : 0,
+  }
+}
+
+function poseOfEntity(id: string) {
+  if (!viewer) return undefined
+  const ent = viewer.entities.getById(id)
+  return poseFromCartesian(ent?.position?.getValue(viewer.clock.currentTime))
+}
 
 /** ====================== 战斗引擎（模块级状态） ====================== */
-type LockState = { attackerId: string; targetId: string }
-const lockStateMap = new Map<string, LockState & { cooldownUntil: number }>()
+const lockStateMap = new Map<string, LockState>()
 const deadEntitySet = new Set<string>()
-const bulletIdToMeta = new Map<string, { attackerId: string; targetId: string; targetReached: boolean; tStart: Cesium.JulianDate; duration: number; startPos: Cesium.Cartesian3; delta: Cesium.Cartesian3 }>()
+const bulletIdToMeta = new Map<string, BulletMeta>()
 const shockwaveStateMap = new Map<string, { stop: boolean }>()
 let lockModeActive = false
 let adhesionEntity: Cesium.Entity | null = null
@@ -143,6 +180,7 @@ const editInfoClose = () => {
 }
 
 onMounted(() => {
+  resetBattleLog()
   viewer = new Cesium.Viewer(cesiumRef.value!, {
     shouldAnimate: true,
     animation: false,
@@ -190,6 +228,14 @@ onMounted(() => {
           const ent = addUnit(item, lng, lat, item.height || (item.unitType === 'AIRCRAFT' || item.unitType === 'UAV' ? 50000 : 0))
           // 敌对单位初始默认隐藏：需进入友军视野范围才显示
           if (item.faction === 'hostile') ent.show = false
+          registerLogUnit({
+            id: item.id,
+            label: item.label,
+            unitType: item.unitType,
+            faction: item.faction,
+            maxHp: item.maxHp,
+            hp: item.hp,
+          })
         }
       })
     }
@@ -211,6 +257,7 @@ onMounted(() => {
   initWeather()
   initWindField()
   startCombatTick()
+  pushSimEvent({ t: 0, type: 'info', message: '态势开始 · 友军与敌对单位进入预设海区' })
 });
 const getCanvasOffset = () => {
   const canvas = viewer?.scene?.canvas as HTMLCanvasElement | undefined
@@ -243,26 +290,12 @@ const sceneContextmenu = (e: MouseEvent) => {
   showEntityMenu(entity, cx, cy)
 }
 const isClickOnBillboard = (entity: Cesium.Entity, windowPosition: any, half = 18) => {
-  const pos = entity.position?.getValue(viewer!.clock.currentTime)
-  if (!pos) return false
-  const screen = Cesium.SceneTransforms.worldToWindowCoordinates(viewer!.scene, pos)
-  if (!screen) return false
-  return (
-    Math.abs(windowPosition.x - screen.x) <= half &&
-    Math.abs(windowPosition.y - screen.y) <= half
-  )
+  if (!viewer) return false
+  return hitBillboard(viewer, entity, windowPosition, half)
 }
 const initTimeline = () => {
-  const now = Cesium.JulianDate.now();
-  viewer!.clock.startTime = now.clone();
-  viewer!.clock.currentTime = now.clone();
-  viewer!.clock.clockRange = Cesium.ClockRange.UNBOUNDED;
-  viewer!.clock.stopTime = Cesium.JulianDate.addDays(now, 365, new Cesium.JulianDate());
-  viewer!.clock.multiplier = 1;
-  viewer!.clock.shouldAnimate = true;
-  viewer!.useDefaultRenderLoop = true;
-  // 记录进入 GIS 系统的起始时刻，控制面板展示"开始时间"
-  entryStartJulian = now.clone()
+  entryStartJulian = initSimClock(viewer!.clock)
+  viewer!.useDefaultRenderLoop = true
 }
 const menuObject = reactive({
   isShow: false,
@@ -276,37 +309,23 @@ const showEntityMenu = (entity: any, x: number, y: number) => {
   menuRef.value.style.top = y + 'px'
   selectedEntry = entity
   emit('selectedEntityChange', entity.id)
-  document.addEventListener('click', chenWhenAnywhereClick)
+  document.addEventListener('click', hideMenuOnOutsideClick)
   showSelectBox(entity)
 }
-const chenWhenAnywhereClick = () => {
+const hideMenuOnOutsideClick = () => {
   menuObject.isShow = false
   menuObject.isShowSelectBox = false
-  document.removeEventListener('click', chenWhenAnywhereClick)
+  document.removeEventListener('click', hideMenuOnOutsideClick)
 }
 const showSelectBox = (entity: any) => {
-  const box = getScreenBoundingBox(entity)
+  if (!viewer) return
+  const box = screenBoxOf(viewer, entity)
   if (!box) return
   menuObject.isShowSelectBox = true
   entitySelectRef.value.style.left = box.left + 'px'
   entitySelectRef.value.style.top = box.top + 'px'
   entitySelectRef.value.style.width = box.right - box.left + 'px'
   entitySelectRef.value.style.height = box.bottom - box.top + 'px'
-}
-const getScreenBoundingBox = (entity: any) => {
-  const scene = viewer!.scene
-  const time = viewer!.clock.currentTime
-  const pos = entity.position?.getValue(time)
-  if (!pos) return null
-  const windowPos = Cesium.SceneTransforms.worldToWindowCoordinates(scene, pos)
-  if (!windowPos) return null
-  const size = 12
-  return {
-    left: windowPos.x - size,
-    right: windowPos.x + size,
-    top: windowPos.y - size,
-    bottom: windowPos.y + size,
-  }
 }
 const leftClickEntity = () => {
   menuObject.isShowSelectBox = false
@@ -318,7 +337,7 @@ const leftClickEntity = () => {
       }
       // 二次屏幕距离校验放宽：取 billboard 屏幕半径（约 18 px）做容差；pick 自身已能精确命中，
       // 此处只是兜底防止鼠标点击位置因极小像素图（远视角缩放）落在 billboard 外的细微漂移
-      if (!isClickOnBillboard(picked.id as Cesium.Entity, e.position, 24)) {
+      if (!hitBillboard(viewer!, picked.id as Cesium.Entity, e.position, 24)) {
         // pick 命中但屏幕坐标稍有偏差不通过时，再做一个最近邻兜底
         const near = nearestSelectableEntityOnScreen(e.position, 40)
         if (!near) return
@@ -341,29 +360,26 @@ const leftClickEntity = () => {
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
 }
 
+function collectLiveEntities(opts?: { faction?: string; selectableOnly?: boolean }) {
+  const list: Cesium.Entity[] = []
+  if (!viewer) return list
+  for (const group of modelList.value || []) {
+    if (opts?.faction && group.faction !== opts.faction) continue
+    for (const item of group.children || []) {
+      if (deadEntitySet.has(item.id)) continue
+      const ent = viewer.entities.getById(item.id)
+      if (!ent) continue
+      if (opts?.selectableOnly && !(ent as any).__isSelectable) continue
+      list.push(ent)
+    }
+  }
+  return list
+}
+
 /** 指定屏幕半径内最近的可选中 unit entity。容差用于点击精度兜底。 */
 function nearestSelectableEntityOnScreen(windowPos: Cesium.Cartesian2, tolerancePx: number): Cesium.Entity | null {
   if (!viewer) return null
-  let nearest: Cesium.Entity | null = null
-  let minDist = tolerancePx
-  for (const group of modelList.value || []) {
-    for (const item of group.children || []) {
-      const id = item.id
-      if (deadEntitySet.has(id)) continue
-      const ent = viewer.entities.getById(id)
-      if (!ent || !(ent as any).__isSelectable || !ent.show) continue
-      const pos = ent.position?.getValue(viewer.clock.currentTime)
-      if (!pos) continue
-      const sp = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, pos)
-      if (!sp) continue
-      const d = Math.hypot(sp.x - windowPos.x, sp.y - windowPos.y)
-      if (d <= minDist) {
-        minDist = d
-        nearest = ent
-      }
-    }
-  }
-  return nearest
+  return nearestSelectableOnScreen(viewer, windowPos, tolerancePx, collectLiveEntities({ selectableOnly: true }))
 }
 const bindInfoFromEntity = (id: string) => {
   const item = findItemFromList(id)
@@ -503,7 +519,7 @@ const addHostileBeacon = (lng: number, lat: number, title: string) => {
   const beaconRadiusHolder = { value: 30000 }
   const beaconAlphaHolder = { value: 0.16 }
   viewer.clock.onTick.addEventListener(() => {
-    const t = (Date.now() % 3000) / 3000
+    const t = (simSeconds() % 3) / 3
     beaconRadiusHolder.value = 30000 + 12000 * Math.sin(t * Math.PI * 2)
     beaconAlphaHolder.value = 0.32 * (0.5 + 0.5 * Math.sin(t * Math.PI * 2))
   })
@@ -565,8 +581,9 @@ const addUnit = (data: any, lng: number, lat: number, height: number) => {
   thisModel.__unitType = data.unitType
 
   // 视野范围 / 雷达扫描范围：作为 parent 的子实体，跟随父级别 show 一起显隐
-  const trackedPos = new Cesium.CallbackProperty(() => {
-    return thisModel.position?.getValue(viewer!.clock.currentTime)
+  const trackedPos = new Cesium.CallbackPositionProperty((time, result) => {
+    const pos = thisModel.position?.getValue(time || viewer!.clock.currentTime)
+    return pos ? Cesium.Cartesian3.clone(pos, result) : Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result)
   }, false)
   viewer!.entities.add({
     id: `${data.id}-vision-ring`,
@@ -621,85 +638,43 @@ const radarScanStateMap = new Map<string, { entity: Cesium.Entity; remove: () =>
 function startRadarScan(entity: any) {
   if (!viewer || !entity?.id) return
   const id = String(entity.id)
-  // 已在扫描中则忽略
   if (radarScanStateMap.has(id)) {
     ElNotification({ title: '雷达扫描', message: '该单位正在执行扫描', type: 'info' })
     return
   }
   const item = findItemFromList(id)
   const radius = item?.radarRange || 60000
-  let angle = 0
-  const sweepDeg = 360
-  const rpm = 60 // 3 圈用时 = 3 秒
-  const stepDeg = (360 * (rpm / 60)) * 0.016 // 每 16ms 步进，约 9.6 度
-  const totalSweep = sweepDeg * 3
+  const scanDuration = 3
   const faction = entity.__faction || 'friendly'
   const themeColor = faction === 'hostile' ? Cesium.Color.fromCssColorString('#ff8a3d') : Cesium.Color.fromCssColorString('#00e5ff')
-
-  // 扇形（椭圆实体配合 CallbackProperty 半径恒定，靠 rotation 旋转表示扫描方向，但 Cesium ellipse 无 rotation。
-  // 这里改用 Polyline + 椭圆填充层叠：椭圆代表底圈，Polyline 代表扫描指针。
-  viewer.entities.add({
-    id: `radar-base-${id}`,
-    position: entity.position,
-    ellipse: {
-      semiMajorAxis: new Cesium.ConstantProperty(radius),
-      semiMinorAxis: new Cesium.ConstantProperty(radius),
-      material: new Cesium.ColorMaterialProperty(themeColor.withAlpha(0.08)),
-      outline: true,
-      outlineColor: themeColor.withAlpha(0.5),
-      height: 0,
-    },
+  const handle = attachRadarSweep({
+    viewer,
+    entity,
+    id,
+    radius,
+    durationSec: scanDuration,
+    color: themeColor,
+    onComplete: () => { radarScanStateMap.delete(id) },
   })
-  viewer.entities.add({
-    id: `radar-sweep-${id}`,
-    position: entity.position,
-    polyline: {
-      positions: new Cesium.CallbackProperty(() => {
-        const center = entity.position?.getValue(viewer!.clock.currentTime)
-        if (!center) return []
-        // 指针端点：角度 angle 的圆周点
-        const sph = Cesium.Cartographic.fromCartesian(center)
-        const lng = Cesium.Math.toDegrees(sph.longitude)
-        const lat = Cesium.Math.toDegrees(sph.latitude)
-        const a = Cesium.Math.toRadians(angle)
-        const targetLng = lng + (radius * Math.cos(a)) / (111320 * Math.cos(Cesium.Math.toRadians(lat)))
-        const targetLat = lat + (radius * Math.sin(a)) / 110540
-        return [Cesium.Cartesian3.fromDegrees(lng, lat, 0), Cesium.Cartesian3.fromDegrees(targetLng, targetLat, 0)]
-      }, false),
-      width: 3,
-      material: themeColor,
-      arcType: Cesium.ArcType.NONE,
-    },
-  })
-
-  let stop = false
-  let sweeped = 0
-  const onTick = () => {
-    if (stop || !viewer) return
-    angle = (angle + stepDeg) % 360
-    sweeped += stepDeg
-    if (sweeped >= totalSweep) {
-      finish()
-    }
-  }
-  viewer.clock.onTick.addEventListener(onTick)
-
-  function finish() {
-    stop = true
-    if (viewer) {
-      viewer.entities.removeById(`radar-base-${id}`)
-      viewer.entities.removeById(`radar-sweep-${id}`)
-      viewer.clock.onTick.removeEventListener(onTick)
-    }
+  const finish = () => {
+    handle.remove()
     radarScanStateMap.delete(id)
   }
   radarScanStateMap.set(id, { entity, remove: finish })
+  pushSimEvent({
+    t: simSeconds(),
+    type: 'scan',
+    side: item?.faction,
+    message: `${item?.label || id} 开始雷达扫描`,
+    attacker: item ? { id: item.id, label: item.label, unitType: item.unitType, faction: item.faction } : undefined,
+    range: radius,
+    durationSec: scanDuration,
+    pose: poseOfEntity(id),
+  })
   ElNotification({ title: '雷达扫描', message: `${item?.label || id} 已开始 3 圈扫描`, type: 'success' })
 }
 
 /** ====================== 攻击指令 / 自动战斗 / 爆炸 / 弹道 ====================== */
-const ATTACK_INTERVAL_S = 1.5
-const BULLET_DURATION_S = 0.35
 const ADHESION_PX = 60
 
 /** 攻击流程：用户下达 attack 后进入"锁定模式"，在敌对实体附近吸附高亮，鼠标点击确认目标；
@@ -807,6 +782,7 @@ function attackPickClick(movement: { position: Cesium.Cartesian2 }) {
     cooldownUntil: 0,
   })
   if (attacker && target) addAttackLine(attacker, target as any)
+  recordLockEvent(attackerItem, targetItem)
   ElNotification({
     title: '目标锁定',
     message: `${attackerItem?.label || attackerId} 已锁定 ${targetItem?.label || targetId}，进入射程自动攻击`,
@@ -816,28 +792,7 @@ function attackPickClick(movement: { position: Cesium.Cartesian2 }) {
 
 function nearestHostileEntityOnScreen(windowPos: Cesium.Cartesian2): Cesium.Entity | null {
   if (!viewer) return null
-  let nearest: Cesium.Entity | null = null
-  let minDist = ADHESION_PX
-  for (const group of modelList.value || []) {
-    if (group.faction !== 'hostile') continue
-    for (const item of group.children || []) {
-      if (deadEntitySet.has(item.id)) continue
-      const ent = viewer.entities.getById(item.id)
-      if (!ent) continue
-      // 视野外的敌方单位不参与吸附锁定
-      if (!ent.show) continue
-      const pos = ent.position?.getValue(viewer.clock.currentTime)
-      if (!pos) continue
-      const sp = Cesium.SceneTransforms.worldToWindowCoordinates(viewer.scene, pos)
-      if (!sp) continue
-      const d = Math.hypot(sp.x - windowPos.x, sp.y - windowPos.y)
-      if (d <= minDist) {
-        minDist = d
-        nearest = ent
-      }
-    }
-  }
-  return nearest
+  return nearestSelectableOnScreen(viewer, windowPos, ADHESION_PX, collectLiveEntities({ faction: 'hostile' }))
 }
 
 function positionAttackLockBox(entity: Cesium.Entity) {
@@ -855,72 +810,58 @@ function positionAttackLockBox(entity: Cesium.Entity) {
 
 function startCombatTick() {
   if (!viewer) return
-  initHostilePatrols()
+  patrolController.init(viewer, modelList.value || [])
   combatTickHandler = (clock: Cesium.Clock) => {
-    if (!viewer) return
-    updateBullets(clock.currentTime)
-    updateLocks(clock.currentTime)
-    // 先更新敌对巡逻位置，再判视野（依赖最新位置）
-    updateHostilePatrols(clock.currentTime)
-    updateVisionVisibility(clock.currentTime)
+    if (!viewer || simPaused) return
+    const now = clock.currentTime
+    moveController.tick(
+      viewer,
+      (id, pos, lng, lat) => {
+        const item = findItemFromList(id)
+        if (item) {
+          item.start.longitude = String(lng)
+          item.start.latitude = String(lat)
+        }
+        if (entryInfoObjet.isShow && entryInfoObjet.infoData?.id === id && !isMasked(entryInfoObjet.infoData)) {
+          entryInfoObjet.infoData.start = { ...entryInfoObjet.infoData.start, longitude: String(lng), latitude: String(lat) }
+        }
+        void pos
+      },
+      (id, pos) => {
+        clearMoveTrackByEntityId(id)
+        syncItemLonLat(id, pos)
+      },
+    )
+    tickBullets({
+      viewer,
+      now,
+      bullets: bulletIdToMeta,
+      onHit: (attackerId, targetId) => applyDamage(attackerId, targetId),
+    })
+    tickLocks({
+      viewer,
+      now,
+      locks: lockStateMap,
+      dead: deadEntitySet,
+      findItem: findItemFromList,
+      fire: (attackerId, targetId, atkPos, tgtPos, t) => {
+        const attackerItem = findItemFromList(attackerId)
+        spawnBullet({
+          viewer: viewer!,
+          bullets: bulletIdToMeta,
+          attackerId,
+          targetId,
+          startPos: atkPos,
+          targetPos: tgtPos,
+          tStart: t,
+          colorCss: attackerItem?.faction === 'friendly' ? '#00e5ff' : '#ff8a3d',
+        })
+      },
+    })
+    patrolController.tick(viewer, now, (id) => moveController.has(id), findItemFromList)
+    updateVisionVisibility(now)
   }
   viewer.clock.onTick.addEventListener(combatTickHandler)
-}
-
-/** 敌对单位自动巡逻（在集结海区附近做圆周轨迹，按单位类型不同半径/高度） */
-const BEACON_LNG = 124.85
-const BEACON_LAT = 30.05
-const patrolStateMap = new Map<string, { tStart: Cesium.JulianDate; radius: number; height: number; phase: number; speedFactor: number }>()
-
-function initHostilePatrols() {
-  if (!viewer) return
-  for (const group of modelList.value || []) {
-    if (group.faction !== 'hostile') continue
-    for (const item of group.children || []) {
-      if (item.unitType === 'GROUND') continue // 地面单位不动
-      const isAir = item.unitType === 'AIRCRAFT' || item.unitType === 'UAV'
-      const radius = item.unitType === 'SHIP' ? 0.35 : isAir ? 0.55 : 0.4 // 经纬度半径
-      const height = item.height || (isAir ? 50000 : 0)
-      const speedFactor = item.unitType === 'SHIP' ? 0.05 : 0.18 // 完整一圈周期约 2π/speedFactor 模拟秒
-      patrolStateMap.set(item.id, {
-        tStart: viewer.clock.currentTime.clone(),
-        radius,
-        height,
-        phase: Math.random() * Math.PI * 2,
-        speedFactor,
-      })
-      // 同步初始 entity position 为巡逻起点
-      applyPatrolPosition(item, viewer.clock.currentTime)
-    }
-  }
-}
-
-function updateHostilePatrols(now: Cesium.JulianDate) {
-  if (!viewer) return
-  patrolStateMap.forEach((state, id) => {
-    const item = findItemFromList(id)
-    if (!item) return
-    applyPatrolPosition(item, now, state)
-  })
-}
-
-function applyPatrolPosition(item: any, now: Cesium.JulianDate, stateOverride?: any) {
-  if (!viewer) return
-  const state = stateOverride || patrolStateMap.get(item.id)
-  if (!state) return
-  const elapsedSecs = Cesium.JulianDate.secondsDifference(now, state.tStart)
-  const angle = state.phase + elapsedSecs * state.speedFactor
-  const lat = BEACON_LAT + state.radius * Math.sin(angle)
-  const lng = BEACON_LNG + state.radius * Math.cos(angle) / Math.cos(Cesium.Math.toRadians(lat))
-  const ent = viewer!.entities.getById(item.id)
-  if (ent) {
-    // 必须包成 ConstantPositionProperty，直接赋 Cartesian3 会让 entity.position.getValue() 返回 undefined
-    ent.position = new Cesium.ConstantPositionProperty(
-      Cesium.Cartesian3.fromDegrees(lng, lat, state.height)
-    )
-  }
-  item.start.longitude = String(lng)
-  item.start.latitude = String(lat)
 }
 
 /** ====================== 视野 / 友方共享视野 / 敌对显隐 ====================== */
@@ -934,137 +875,17 @@ function collectHostileIds() {
 }
 function updateVisionVisibility(now: Cesium.JulianDate) {
   if (!viewer) return
-  if (hostileIdList.length === 0) collectHostileIds()
-  const friendlySensors: Array<{ pos: Cesium.Cartesian3; range: number }> = []
-  for (const group of modelList.value || []) {
-    if (group.faction !== 'friendly') continue
-    for (const item of group.children || []) {
-      if (deadEntitySet.has(item.id)) continue
-      const ent = viewer!.entities.getById(item.id)
-      const pos = ent?.position?.getValue(now)
-      if (pos) friendlySensors.push({ pos, range: item.visionRange || 60000 })
-    }
-  }
-  // hostileIdList 与 modelList 中对应 item 通过 id 查找
-  for (const hid of hostileIdList) {
-    if (deadEntitySet.has(hid)) continue
-    const ent = viewer!.entities.getById(hid)
-    if (!ent) continue
-    const pos = ent.position?.getValue(now)
-    if (!pos) continue
-    let visible = false
-    for (const s of friendlySensors) {
-      const d = Cesium.Cartesian3.distance(pos, s.pos)
-      if (d <= s.range) {
-        visible = true
-        break
-      }
-    }
-    if (ent.show !== visible) {
-      ent.show = visible
-      // 同步更新列表中的 label：视野内 → "类型-编号"，未发现 → "单位-XXX"（或保留默认）
-      const item = findItemFromList(hid)
-      if (item && item.faction === 'hostile') {
-        if (visible && item._visibleLabel) {
-          item.label = item._visibleLabel
-        } else if (!visible && item._invisibleLabel) {
-          item.label = item._invisibleLabel
-        }
-      }
-    }
-  }
-}
-
-function updateBullets(now: Cesium.JulianDate) {
-  if (!viewer) return
-  bulletIdToMeta.forEach((meta, bid) => {
-    const elapsed = Cesium.JulianDate.secondsDifference(now, meta.tStart)
-    if (!meta.targetReached && elapsed >= BULLET_DURATION_S) {
-      meta.targetReached = true
-      applyDamage(meta.attackerId, meta.targetId)
-      // 弹道完成后短暂保留 0.05s 再清理
-      setTimeout(() => {
-        if (viewer) {
-          viewer.entities.removeById(bid)
-          bulletIdToMeta.delete(bid)
-        }
-      }, 50)
-    }
-  })
-}
-
-function updateLocks(now: Cesium.JulianDate) {
-  if (!viewer) return
-  // 用模拟时间（受 viewer.clock.multiplier 控制）做冷却判定，倍速越快冷却越快
-  const nowSecs = Cesium.JulianDate.secondsDifference(now, viewer.clock.startTime)
-  lockStateMap.forEach((state, attackerId) => {
-    if (deadEntitySet.has(attackerId) || deadEntitySet.has(state.targetId)) {
-      // 死亡清理交给 onDeath
-      return
-    }
-    if (nowSecs < (state.cooldownUntil || 0)) return
-    const attacker = viewer!.entities.getById(attackerId)
-    const target = viewer!.entities.getById(state.targetId)
-    if (!attacker || !target) return
-    const atkPos = attacker.position?.getValue(now)
-    const tgtPos = target.position?.getValue(now)
-    if (!atkPos || !tgtPos) return
-    const distance = Cesium.Cartesian3.distance(atkPos, tgtPos)
-    const attackerItem = findItemFromList(attackerId)
-    if (!attackerItem) return
-    const range = attackerItem.attackRange || 20000
-    if (distance <= range) {
-      fireBullet(attackerId, state.targetId, atkPos, tgtPos, now)
-      state.cooldownUntil = nowSecs + ATTACK_INTERVAL_S
-    }
-  })
-}
-
-function fireBullet(
-  attackerId: string,
-  targetId: string,
-  startPos: Cesium.Cartesian3,
-  targetPos: Cesium.Cartesian3,
-  tStart: Cesium.JulianDate
-) {
-  if (!viewer) return
-  const attackerItem = findItemFromList(attackerId)
-  const theme = attackerItem?.faction === 'friendly' ? '#00e5ff' : '#ff8a3d'
-  const bulletColor = Cesium.Color.fromCssColorString(theme)
-  const bid = `bullet-${Date.now()}-${Math.floor(Math.random() * 1e4)}`
-  // 持续靶点快照（命中前不改；高速弹道，目标移动较小可接受）
-  const tgtSnapshot = targetPos.clone()
-  const meta = {
-    attackerId,
-    targetId,
-    targetReached: false,
-    tStart: tStart.clone(),
-    duration: BULLET_DURATION_S,
-    startPos: startPos.clone(),
-    targetPos: tgtSnapshot,
-  }
-  bulletIdToMeta.set(bid, meta)
-  viewer.entities.add({
-    id: bid,
-    polyline: {
-      positions: new Cesium.CallbackProperty(() => {
-        const start = meta.startPos
-        const end = meta.targetPos
-        if (meta.targetReached) return [end, end]
-        const elapsed = Cesium.JulianDate.secondsDifference(viewer!.clock.currentTime, meta.tStart)
-        const t = Math.max(0, Math.min(1, elapsed / meta.duration))
-        const cur = new Cesium.Cartesian3(
-          start.x + (end.x - start.x) * t,
-          start.y + (end.y - start.y) * t,
-          start.z + (end.z - start.z) * t
-        )
-        return [start, cur]
-      }, false),
-      width: 4,
-      material: new Cesium.PolylineArrowMaterialProperty(bulletColor),
-      arcType: Cesium.ArcType.NONE,
-      clampToGround: false,
-    },
+  updateSharedVision({
+    viewer,
+    now,
+    simSec: simSeconds(now),
+    multiplier: viewer.clock.multiplier || 1,
+    lastVisionSim,
+    hostileIds: hostileIdList,
+    collectHostileIds,
+    groups: modelList.value || [],
+    dead: deadEntitySet,
+    findItem: findItemFromList,
   })
 }
 
@@ -1074,27 +895,55 @@ function applyDamage(attackerId: string, targetId: string) {
   if (!attackerItem || !targetItem) return
   if (deadEntitySet.has(targetId)) return
   const damage = attackerItem.attackPower || 80
-  targetItem.hp = Math.max(0, (targetItem.hp ?? 0) - damage)
-  // 触发右侧报告（仅友军被攻击时记录）
-  if (targetItem.faction === 'friendly') {
-    emit('battleReport', {
-      attackerId,
-      attackerLabel: attackerItem.label,
-      targetId,
-      targetLabel: targetItem.label,
-      damage,
-    })
-  }
-  // 若死者已为0或本次命中将其打至0 → 触发爆炸
+  const hpBefore = targetItem.hp ?? 0
+  targetItem.hp = Math.max(0, hpBefore - damage)
+  pushSimEvent({
+    t: simSeconds(),
+    type: 'attack',
+    side: attackerItem.faction,
+    message: `${attackerItem.label} 命中 ${targetItem.label}`,
+    attacker: { id: attackerItem.id, label: attackerItem.label, unitType: attackerItem.unitType, faction: attackerItem.faction },
+    target: { id: targetItem.id, label: targetItem.label, unitType: targetItem.unitType, faction: targetItem.faction, hpBefore, hpAfter: targetItem.hp },
+    fromPose: poseOfEntity(attackerId),
+    toPose: poseOfEntity(targetId),
+  })
+  emit('battleReport', {
+    kind: 'hit',
+    attackerId,
+    attackerLabel: attackerItem.label,
+    targetId,
+    targetLabel: targetItem.label,
+    targetFaction: targetItem.faction,
+    damage,
+  })
   if ((targetItem.hp ?? 0) <= 0) {
-    triggerDeath(targetItem)
+    triggerDeath(targetItem, attackerItem)
   }
 }
 
 /** 触发单位被击毁：失能 + 爆炸 + 冲击波 + 清理锁定关系 */
-function triggerDeath(targetItem: any) {
+function triggerDeath(targetItem: any, attackerItem?: any) {
   if (!viewer || deadEntitySet.has(targetItem.id)) return
   deadEntitySet.add(targetItem.id)
+  moveController.stop(viewer, targetItem.id)
+  clearMoveTrackByEntityId(targetItem.id)
+  pushSimEvent({
+    t: simSeconds(),
+    type: 'kill',
+    side: targetItem.faction,
+    message: `${targetItem.label} 被击毁`,
+    target: { id: targetItem.id, label: targetItem.label, unitType: targetItem.unitType, faction: targetItem.faction, hpBefore: 0, hpAfter: 0 },
+    pose: poseOfEntity(targetItem.id),
+  })
+  emit('battleReport', {
+    kind: 'kill',
+    attackerId: attackerItem?.id || '',
+    attackerLabel: attackerItem?.label || '',
+    targetId: targetItem.id,
+    targetLabel: targetItem.label,
+    targetFaction: targetItem.faction,
+    damage: 0,
+  })
   // 失能：移除可选中标志，移除锁定涉及该实体的关系
   const target = viewer.entities.getById(targetItem.id)
   if (target) {
@@ -1103,7 +952,7 @@ function triggerDeath(targetItem: any) {
     const pos = target.position?.getValue(viewer.clock.currentTime)
     if (pos) {
       const theme = targetItem.faction === 'friendly' ? '#00e5ff' : '#ff8a3d'
-      playExplosion(pos, theme, targetItem.height || 0)
+      spawnExplosion(viewer, pos, theme, targetItem.height || 0, shockwaveStateMap)
     }
   }
   // 清理该 entity 关联的锁定与攻击线
@@ -1128,172 +977,144 @@ function triggerDeath(targetItem: any) {
   checkBattleEnd()
 }
 
-/** 爆炸效果：火焰 billboard + 扩张冲击波（一秒内扩张淡出） */
-function getExplosionImage() {
-  // 用一个简单的彩色圆作为爆炸图（不依赖外部资源）
-  const size = 128
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')!
-  const grad = ctx.createRadialGradient(size / 2, size / 2, 4, size / 2, size / 2, size / 2)
-  grad.addColorStop(0, 'rgba(255,230,150,1)')
-  grad.addColorStop(0.4, 'rgba(255,140,40,0.9)')
-  grad.addColorStop(1, 'rgba(255,40,20,0)')
-  ctx.fillStyle = grad
-  ctx.beginPath()
-  ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2)
-  ctx.fill()
-  return canvas.toDataURL()
-}
-const explosionImageData = getExplosionImage()
-
-function playExplosion(cartesian: Cesium.Cartesian3, theme: string, baseHeight: number) {
+function freezeEntityPosition(entity: Cesium.Entity, time?: Cesium.JulianDate) {
   if (!viewer) return
-  const color = Cesium.Color.fromCssColorString(theme)
-  // 火焰/闪光 billboard
-  const flash = viewer.entities.add({
-    position: cartesian,
-    billboard: {
-      image: explosionImageData,
-      width: 120,
-      height: 120,
-      verticalOrigin: Cesium.VerticalOrigin.CENTER,
-      scaleByDistance: new Cesium.NearFarScalar(5e3, 1.2, 5e6, 0.4),
-    },
-  })
-  // 冲击波：扩张椭圆，1 模拟秒内淡出（受 GIS 倍速影响）
-  const startSecs = Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime)
-  const durationSecs = 1.0
-  let shockRadius = 200
-  const maxRadius = Math.max(2000, baseHeight + 4000)
-  const shockId = `shock-${Date.now()}-${Math.floor(Math.random() * 1e4)}`
-  const shockware = viewer.entities.add({
-    id: shockId,
-    position: cartesian,
-    ellipse: {
-      semiMajorAxis: new Cesium.CallbackProperty(() => shockRadius, false),
-      semiMinorAxis: new Cesium.CallbackProperty(() => shockRadius, false),
-      material: new Cesium.ColorMaterialProperty(
-        new Cesium.CallbackProperty(() => {
-          if (!viewer) return color.withAlpha(0)
-          const t = Math.min(1, Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime) - startSecs)
-          return color.withAlpha(0.5 * (1 - t))
-        }, false)
-      ),
-      outline: true,
-      outlineColor: new Cesium.CallbackProperty(() => {
-        if (!viewer) return color.withAlpha(0)
-        const t = Math.min(1, Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime) - startSecs)
-        return color.withAlpha(0.9 * (1 - t))
-      }, false),
-      height: 0,
-    },
-  })
-  let stop = false
-  const tick = () => {
-    if (stop || !viewer) return
-    const t = Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime) - startSecs
-    shockRadius = 200 + (maxRadius - 200) * Math.min(1, t)
-    if (t >= 1) finish()
-  }
-  viewer.clock.onTick.addEventListener(tick)
-  function finish() {
-    stop = true
-    if (viewer) {
-      viewer.entities.remove(flash)
-      viewer.entities.remove(shockware)
-      viewer.clock.onTick.removeEventListener(tick)
-    }
-    shockwaveStateMap.delete(shockId)
-  }
-  shockwaveStateMap.set(shockId, { stop })
-  // 火焰稍短暂消失（使用模拟秒检测，避免 setTimeout 受倍速错位）
-  let flashStop = false
-  const flashTick = () => {
-    if (flashStop || !viewer) return
-    const t = Cesium.JulianDate.secondsDifference(viewer.clock.currentTime, viewer.clock.startTime) - startSecs
-    if (t >= 0.8) {
-      flashStop = true
-      viewer.entities.remove(flash)
-      viewer.clock.onTick.removeEventListener(flashTick)
-    }
-  }
-  viewer.clock.onTick.addEventListener(flashTick)
+  const now = time || viewer.clock.currentTime
+  const pos = entity.position?.getValue(now)
+  if (!pos) return
+  freezeEntityTo(entity, pos)
 }
+
+function syncItemLonLat(entityId: string, pos: Cesium.Cartesian3) {
+  const item = findItemFromList(entityId)
+  if (!item) return
+  const carto = Cesium.Cartographic.fromCartesian(pos)
+  item.start.longitude = String(Cesium.Math.toDegrees(carto.longitude))
+  item.start.latitude = String(Cesium.Math.toDegrees(carto.latitude))
+}
+
+function cancelMovePickMode() {
+  movePickActive.value = false
+  if (viewer?.canvas) viewer.canvas.style.cursor = ''
+  if (handler) {
+    handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
+  }
+  if (moveEscHandlerRef) {
+    window.removeEventListener('keydown', moveEscHandlerRef)
+    moveEscHandlerRef = null
+  }
+  leftClickEntity()
+}
+
+function beginUnitMove(entity: Cesium.Entity, targetCarto: Cesium.Cartographic) {
+  if (!viewer || !entity.id) return false
+  const item = findItemFromList(String(entity.id))
+  const started = moveController.start({
+    viewer,
+    entity,
+    targetCarto,
+    moveSpeed: item?.moveSpeed || 50,
+  })
+  if (!started.ok) {
+    if (started.reason === 'too-close') {
+      ElNotification({ title: '移动指令', message: '目标点过近，请重新选择', type: 'warning', duration: 1200 })
+    } else {
+      ElNotification({ title: '移动指令', message: '无法计算移动路径，请重新选择目标点', type: 'warning', duration: 1200 })
+    }
+    return false
+  }
+  addMoveTrack(entity, started.startPos, started.targetPos)
+  if (item) {
+    const startCarto = Cesium.Cartographic.fromCartesian(started.startPos)
+    const endCarto = Cesium.Cartographic.fromCartesian(started.targetPos)
+    pushSimEvent({
+      t: simSeconds(),
+      type: 'move',
+      side: item.faction,
+      message: `${item.label} 开始机动`,
+      attacker: { id: item.id, label: item.label, unitType: item.unitType, faction: item.faction },
+      path: {
+        fromLng: Cesium.Math.toDegrees(startCarto.longitude),
+        fromLat: Cesium.Math.toDegrees(startCarto.latitude),
+        toLng: Cesium.Math.toDegrees(endCarto.longitude),
+        toLat: Cesium.Math.toDegrees(endCarto.latitude),
+        height: Number.isFinite(startCarto.height) ? startCarto.height : (item.height || 0),
+        durationSec: started.durationSec,
+      },
+    })
+  }
+  return true
+}
+
 /**
- * 移动指令：左键选目标点，沿插值轨迹匀速移动。
+ * 移动指令：左键选地球表面目标点，沿大地线按仿真时间匀速移动。
  */
 const triggerMove = () => {
-  handler!.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
-  handler!.setInputAction((e) => {
+  if (!viewer || !handler || !selectedEntry) {
+    ElNotification({ title: '移动指令', message: '请先选中单位', type: 'warning' })
+    return
+  }
+  if (deadEntitySet.has(String(selectedEntry.id))) {
+    ElNotification({ title: '移动指令', message: '该单位已被击毁，无法行动', type: 'warning' })
+    return
+  }
+  menuObject.isShowSelectBox = false
+  movePickActive.value = true
+  viewer.canvas.style.cursor = 'crosshair'
+  handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
+  const escHandler = (e: KeyboardEvent) => {
+    if (e.code === 'Escape') cancelMovePickMode()
+  }
+  moveEscHandlerRef = escHandler
+  window.addEventListener('keydown', escHandler)
+  handler.setInputAction((e: { position: Cesium.Cartesian2 }) => {
     menuObject.isShowSelectBox = false
-    let target: Cesium.Cartesian3 | undefined = viewer!.scene.pickPosition(e.position) || undefined
-    // 兜底：Columbus 视图或 pickPosition 返回 null 情况下，用 ray 与 globe 拾取
-    if (!target) {
-      const ray = viewer!.camera.getPickRay(e.position)
-      if (ray) target = viewer!.scene.globe.pick(ray, viewer!.scene) || undefined
-    }
-    if (!target) {
-      handler!.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
-      leftClickEntity()
+    if (!viewer) return
+    const target = pickGlobe(viewer, e.position)
+    const movingEntity = selectedEntry
+    if (!target || !movingEntity) {
+      cancelMovePickMode()
+      ElNotification({ title: '移动指令', message: '未能拾取到地图点', type: 'warning', duration: 1200 })
       return
     }
-    const carto = Cesium.Cartographic.fromCartesian(target);
-    const longitude = Cesium.Math.toDegrees(carto.longitude);
-    const latitude = Cesium.Math.toDegrees(carto.latitude);
-    const tStart = viewer!.clock.currentTime
-    const startPos = selectedEntry.position?.getValue(tStart)
-    if (!startPos) {
-      handler!.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
-      leftClickEntity()
-      return
+    const carto = Cesium.Cartographic.fromCartesian(target)
+    const ok = beginUnitMove(movingEntity, carto)
+    cancelMovePickMode()
+    if (ok) {
+      const label = findItemFromList(String(movingEntity.id))?.label || movingEntity.id
+      ElNotification({ title: '移动指令', message: `${label} 已出发`, type: 'success', duration: 1200 })
     }
-    const item = findItemFromList(selectedEntry.id)
-    const speed = item?.moveSpeed || 50
-    const startCarto = Cesium.Cartographic.fromCartesian(startPos)
-    const geodesic = new Cesium.EllipsoidGeodesic()
-    geodesic.setEndPoints(startCarto, carto)
-    const distanceMeters = geodesic.surfaceDistance
-    const durationSeconds = Math.max(2, distanceMeters / speed)
-    const targetHeight = carto.height || (item?.height ?? 0)
-    const targetPos = Cesium.Cartesian3.fromDegrees(longitude, latitude, targetHeight)
-    const tEnd = Cesium.JulianDate.addSeconds(tStart, durationSeconds, new Cesium.JulianDate())
-    const movePos = new Cesium.SampledPositionProperty()
-    movePos.addSample(tStart, startPos)
-    movePos.addSample(tEnd, targetPos)
-    // Lagrange 多项式插值，避免 2 个样本时插值在某些 tick 上不前进
-    movePos.setInterpolationOptions({
-      interpolationDegree: 2,
-      interpolationAlgorithm: Cesium.LagrangePolynomialApproximation,
-    })
-    movePos.forwardExtrapolationType = Cesium.ExtrapolationType.HOLD
-    movePos.forwardExtrapolationDuration = Number.POSITIVE_INFINITY
-    selectedEntry.position = movePos
-    selectedEntry.orientation = new Cesium.VelocityOrientationProperty(movePos)
-    addMoveTrack(selectedEntry, tStart, tEnd, startPos, targetPos)
-
-    if (item) {
-      item.start.longitude = String(longitude)
-      item.start.latitude = String(latitude)
-    }
-
-    handler!.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_CLICK)
-    leftClickEntity()
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
+  ElNotification({ title: '移动指令', message: '请在地图上点击目标点，ESC 取消', type: 'info', duration: 1600 })
 }
 const triggerStop = () => {
-  const t = viewer!.clock.currentTime
-  const pos = selectedEntry.position?.getValue(t)
-  if (!pos) return
-  const hold = new Cesium.ConstantPositionProperty(pos)
-  selectedEntry.position = hold
-  const item = findItemFromList(selectedEntry.id)
-  if (item) {
-    const carto = Cesium.Cartographic.fromCartesian(pos)
-    item.start.longitude = String(Cesium.Math.toDegrees(carto.longitude))
-    item.start.latitude = String(Cesium.Math.toDegrees(carto.latitude))
-  }
+  if (!viewer || !selectedEntry) return
+  const id = String(selectedEntry.id)
+  moveController.stop(viewer, id)
+  clearMoveTrackByEntityId(id)
+  freezeEntityPosition(selectedEntry)
+  const pos = selectedEntry.position?.getValue(viewer.clock.currentTime)
+  if (pos) syncItemLonLat(id, pos)
+}
+function recordLockEvent(attackerItem: any, targetItem: any) {
+  if (!attackerItem || !targetItem) return
+  pushSimEvent({
+    t: simSeconds(),
+    type: 'lock',
+    side: attackerItem.faction,
+    message: `${attackerItem.label} 锁定 ${targetItem.label}`,
+    attacker: { id: attackerItem.id, label: attackerItem.label, unitType: attackerItem.unitType, faction: attackerItem.faction },
+    target: {
+      id: targetItem.id,
+      label: targetItem.label,
+      unitType: targetItem.unitType,
+      faction: targetItem.faction,
+      hpBefore: targetItem.hp ?? 0,
+      hpAfter: targetItem.hp ?? 0,
+    },
+    fromPose: poseOfEntity(attackerItem.id),
+    toPose: poseOfEntity(targetItem.id),
+  })
 }
 const addAttackLine = (entityFrom: any, entityTo: any) => {
   const key = `${entityFrom.id}->${entityTo.id}`
@@ -1304,9 +1125,15 @@ const addAttackLine = (entityFrom: any, entityTo: any) => {
   }
   const lineEntity = viewer!.entities.add({
     polyline: {
+      show: new Cesium.CallbackProperty(() => {
+        return !!(entityFrom?.show && entityTo?.show)
+      }, false),
       positions: new Cesium.CallbackProperty(() => {
-        const p1 = entityFrom.position?.getValue(Cesium.JulianDate.now())
-        const p2 = entityTo.position?.getValue(Cesium.JulianDate.now())
+        if (!viewer) return []
+        if (!entityFrom?.show || !entityTo?.show) return []
+        const now = viewer.clock.currentTime
+        const p1 = entityFrom.position?.getValue(now)
+        const p2 = entityTo.position?.getValue(now)
         if (!p1 || !p2) return []
         return [p1, p2]
       }, false),
@@ -1319,18 +1146,15 @@ const addAttackLine = (entityFrom: any, entityTo: any) => {
 }
 const clearMoveTrackByEntityId = (entityId: string) => {
   if (!viewer || !moveTrackMap.has(entityId)) return
-  const { solidLineId, dashedLineId, tickHandler } = moveTrackMap.get(entityId)!
+  const { solidLineId, dashedLineId } = moveTrackMap.get(entityId)!
   viewer.entities.removeById(solidLineId)
   viewer.entities.removeById(dashedLineId)
-  viewer.clock.onTick.removeEventListener(tickHandler)
   moveTrackMap.delete(entityId)
 }
 const addMoveTrack = (
   entity: Cesium.Entity,
-  tStart: Cesium.JulianDate,
-  tEnd: Cesium.JulianDate,
   startPos: Cesium.Cartesian3,
-  targetPos: Cesium.Cartesian3
+  targetPos: Cesium.Cartesian3,
 ) => {
   if (!viewer || !entity.id) return
   const entityId = String(entity.id)
@@ -1359,16 +1183,9 @@ const addMoveTrack = (
       clampToGround: false
     }
   })
-  const tickHandler = (clock: Cesium.Clock) => {
-    if (Cesium.JulianDate.greaterThanOrEquals(clock.currentTime, tEnd)) {
-      clearMoveTrackByEntityId(entityId)
-    }
-  }
-  viewer.clock.onTick.addEventListener(tickHandler)
   moveTrackMap.set(entityId, {
     solidLineId: String(solidLineEntity.id),
     dashedLineId: String(dashedLineEntity.id),
-    tickHandler
   })
 }
 const flyToEntityById = (id: string) => {
@@ -1424,6 +1241,7 @@ const HEAT_MAX_RADIUS = 1.2
 const HEAT_STEP_RADIUS = 0.18
 let heatCurrentRadius = HEAT_INIT_RADIUS
 let heatAccumulatedSecs = 0
+let lastHeatWallMs = 0
 let heatRadiateHandler: ((clock: Cesium.Clock) => void) | null = null
 function rebuildHeatMap(maxRadius: number, count: number) {
   const points = generateRadiationPoints(HEAT_CENTER_LNG, HEAT_CENTER_LAT, count, maxRadius)
@@ -1445,7 +1263,7 @@ const initHeatMap = () => {
   if (!viewer) return
   let lastTime = viewer.clock.currentTime.clone()
   heatRadiateHandler = (clock: Cesium.Clock) => {
-    if (!viewer) return
+    if (!viewer || simPaused) return
     const dt = Cesium.JulianDate.secondsDifference(clock.currentTime, lastTime)
     if (dt <= 0) {
       lastTime = clock.currentTime.clone()
@@ -1453,10 +1271,16 @@ const initHeatMap = () => {
     }
     heatAccumulatedSecs += dt
     lastTime = clock.currentTime.clone()
-    if (heatAccumulatedSecs >= 20) {
+    if (heatAccumulatedSecs < 20) return
+    if ((clock.multiplier || 1) >= 1000) {
       heatAccumulatedSecs = 0
-      doRadiateStep()
+      return
     }
+    const wall = Date.now()
+    if (wall - lastHeatWallMs < 1000) return
+    heatAccumulatedSecs = 0
+    lastHeatWallMs = wall
+    doRadiateStep()
   }
   viewer.clock.onTick.addEventListener(heatRadiateHandler)
 }
@@ -1595,190 +1419,33 @@ void main() {
 const initWeather = () => {
   viewer!.scene.postProcessStages.add(weatherStage)
   viewer!.scene.preUpdate.addEventListener(() => {
-    weatherStage.uniforms.time += 0.016
+    if (!viewer || simPaused) return
+    const dt = Math.min(viewer.clock.multiplier || 1, 8) * 0.016
+    weatherStage.uniforms.time += dt
   })
 }
 const changeWeather = (weatherType: number) => {
   weatherStage.uniforms.weatherType = weatherType
+  const names = ['晴', '雾', '雨', '雷', '雷雨', '雪', '多云']
+  pushSimEvent({ t: simSeconds(), type: 'weather', message: `天气切换：${names[weatherType] || weatherType}` })
 }
 
-/**
- * 地图风场（外网公开数据优先，大范围 Mock 兜底）
- * - 加载阶段调用 mock/wind.ts.loadWindGrid() 拉取 Open-Meteo 风场网格
- * - 粒子系统：1200 个，每个粒子每帧根据所在格点的风向/风速步进
- * - 粒子拖尾用 Polyline + CallbackProperty，颜色由风速强度上色（淡蓝→亮青）
- * - 风场更新绑在 preUpdate 上（实时帧率驱动），不受 GIS 倍速影响
- */
-/**
- * 地图风场（Mock 数据驱动）
- * 在大范围海区（80°E–170°E / 0°–55°N）渲染粒子拖尾，长风线（trail 12 点）
- * 其中部分粒子在固定涡心区域（约 130°E, 25°N 附近）做气旋式运动
- * 总体感受近似气象预报中的西太平洋风场（带旋涡）
- */
-type WindParticle = {
-  lng: number
-  lat: number
-  age: number
-  maxAge: number
-  trail: { lng: number; lat: number }[]
-  /** 是否受涡心影响（用于颜色加亮） */
-  vortex: boolean
-}
-const windBox = { minLng: 80, maxLng: 170, minLat: 0, maxLat: 55 }
-const windConfig = reactive({ enabled: true, count: 1800, trailMax: 12, fps: 30, ready: false })
-let windParticles: WindParticle[] = []
-let windEntityMap = new Map<string, Cesium.Entity>()
-let windTickHandler: (() => void) | null = null
-let windLastMs = 0
-const windIdPrefix = 'wind-p-'
-
-/** 大尺度风场函数：返回 [经度增量, 纬度增量] per m */
-function fieldAt(lng: number, lat: number): { dx: number; dy: number; speed: number } {
-  // 基础场：东北向盛行风（drift 风）
-  const t = Date.now() * 0.00003
-  let baseDir = Cesium.Math.toRadians(220 + 12 * Math.sin(t + lng * 0.05))
-  let baseSpeed = 7 + 2.5 * Math.sin(lat * 0.15 + t)
-
-  // 气旋涡心：中心位置 = 轻微缓慢旋转的中心
-  const vortexCenter = { lng: 132, lat: 24 }
-  // 涡心半径（经纬度单位）
-  const vortexMaxRadius = 18
-  const dLng = lng - vortexCenter.lng
-  const dLat = lat - vortexCenter.lat
-  // 缓慢漂移涡心（气旋不会固定位置）
-  const cx = vortexCenter.lng + 1.5 * Math.sin(t * 2)
-  const cy = vortexCenter.lat + 0.8 * Math.cos(t * 2)
-  const rx = lng - cx
-  const ry = lat - cy
-  const r = Math.sqrt(rx * rx + ry * ry)
-  // 距涡心越近切向速度越大；超出半径则按距离衰减
-  const tangentialStrength = Math.max(0, 1 - r / vortexMaxRadius)
-  // 切向方向（顺时针旋转 = 北半球气旋）
-  const tangentAngle = Math.atan2(rx, -ry)
-  // 把 baseDir 转为向量再叠加切向向量再归一化
-  let vx = baseSpeed * Math.cos(baseDir) + 22 * tangentialStrength * Math.cos(tangentAngle)
-  let vy = baseSpeed * Math.sin(baseDir) + 22 * tangentialStrength * Math.sin(tangentAngle)
-  const magnitude = Math.sqrt(vx * vx + vy * vy)
-  if (magnitude > 0.001) {
-    vx = (vx / magnitude) * (baseSpeed + 18 * tangentialStrength)
-    vy = (vy / magnitude) * (baseSpeed + 18 * tangentialStrength)
-  }
-  // 单位 m/s → 经纬度步长：1 度 ≈ 111 km，每秒走 speed m，单帧 dt 设定后步长另行换算
-  // 这里简化为每帧 dx/dy 度/帧
-  const stepDeg = 0.05
-  const speed = Math.sqrt(vx * vx + vy * vy)
-  return { dx: (vx / Math.max(1, speed)) * stepDeg, dy: (vy / Math.max(1, speed)) * stepDeg, speed }
-}
-
-function seedWindParticles() {
-  windParticles = []
-  for (let i = 0; i < windConfig.count; i++) {
-    const vortex = Math.random() < 0.18
-    let lng: number, lat: number
-    if (vortex) {
-      // 涡心附近布置
-      const r = Math.pow(Math.random(), 0.7) * 18
-      const a = Math.random() * Math.PI * 2
-      lng = 132 + r * Math.cos(a)
-      lat = 24 + r * Math.sin(a) * 0.5
-    } else {
-      lng = windBox.minLng + Math.random() * (windBox.maxLng - windBox.minLng)
-      lat = windBox.minLat + Math.random() * (windBox.maxLat - windBox.minLat)
-    }
-    windParticles.push({
-      lng,
-      lat,
-      age: Math.floor(Math.random() * 100),
-      maxAge: 80 + Math.floor(Math.random() * 80),
-      trail: [],
-      vortex,
-    })
-  }
-}
-function lerpColor(t: number) {
-  // t in [0,1]，淡蓝 → 亮青/紫（旋涡区高亮）
-  const r = Math.round(150 + (140 - 150) * t)
-  const g = Math.round(200 + (90 - 200) * t)
-  const b = Math.round(255)
-  const a = 0.35 + 0.55 * t
-  return `rgba(${r}, ${g}, ${b}, ${a.toFixed(2)})`
-}
-function stepWind() {
-  for (const p of windParticles) {
-    const f = fieldAt(p.lng, p.lat)
-    p.trail.push({ lng: p.lng, lat: p.lat })
-    if (p.trail.length > windConfig.trailMax) p.trail.shift()
-    const cosLat = Math.cos(Cesium.Math.toRadians(p.lat))
-    p.lng += f.dx / cosLat
-    p.lat += f.dy
-    p.age++
-    if (p.age > p.maxAge || p.lng < windBox.minLng || p.lng > windBox.maxLng || p.lat < windBox.minLat || p.lat > windBox.maxLat) {
-      const vortex = Math.random() < 0.18
-      if (vortex) {
-        const r = Math.pow(Math.random(), 0.7) * 18
-        const a = Math.random() * Math.PI * 2
-        p.lng = 132 + r * Math.cos(a)
-        p.lat = 24 + r * Math.sin(a) * 0.5
-      } else {
-        p.lng = windBox.minLng + Math.random() * (windBox.maxLng - windBox.minLng)
-        p.lat = windBox.minLat + Math.random() * (windBox.maxLat - windBox.minLat)
-      }
-      p.age = 0
-      p.trail = [{ lng: p.lng, lat: p.lat }]
-      p.vortex = vortex
-    }
-  }
-}
-function createWindEntities() {
-  if (!viewer) return
-  windParticles.forEach((p, i) => {
-    const id = `${windIdPrefix}${i}`
-    const positions = new Cesium.CallbackProperty(() => {
-      return p.trail.map((t) => Cesium.Cartesian3.fromDegrees(t.lng, t.lat, 12000))
-    }, false)
-    const color = p.vortex
-      ? Cesium.Color.fromCssColorString(lerpColor(0.95))
-      : Cesium.Color.fromCssColorString(lerpColor(Math.min(1, 6 / 18)))
-    const ent = viewer!.entities.add({
-      id,
-      polyline: {
-        positions,
-        width: p.vortex ? 2.0 : 1.3,
-        material: new Cesium.ColorMaterialProperty(color),
-        arcType: Cesium.ArcType.NONE,
-        clampToGround: false,
-      },
-    })
-    windEntityMap.set(id, ent)
-  })
-}
 const initWindField = () => {
   if (!viewer) return
-  seedWindParticles()
-  createWindEntities()
-  windConfig.ready = true
-  windLastMs = Date.now()
-  windTickHandler = () => {
-    if (!windConfig.enabled || !viewer) return
-    const now = Date.now()
-    if (now - windLastMs < 1000 / windConfig.fps) return
-    windLastMs = now
-    stepWind()
-  }
-  viewer.scene.preUpdate.addEventListener(windTickHandler)
+  windField.init(viewer, () => ({
+    paused: simPaused,
+    multiplier: viewer!.clock.multiplier || 1,
+    simSec: simSeconds(),
+  }))
   ElNotification({
     title: '风场加载',
-    message: `已加载大范围 Mock 风场（${windConfig.count} 粒子，含气旋涡心）`,
+    message: `已加载大范围 Mock 风场（${windField.config.count} 粒子，含气旋涡心）`,
     type: 'success',
     duration: 2000,
   })
 }
 const toggleWindField = (on: boolean) => {
-  windConfig.enabled = on
-  if (!viewer) return
-  windEntityMap.forEach((ent) => {
-    ent.show = on
-  })
+  windField.toggle(on)
 }
 /** 胜负判定：友军全灭→失败，敌对全灭→胜利 */
 const battleResult = ref<'win' | 'lose' | null>(null)
@@ -1795,15 +1462,6 @@ function checkBattleEnd() {
   }
   if (hostileAlive === 0) battleResult.value = 'win'
   else if (friendlyAlive === 0) battleResult.value = 'lose'
-  if (battleResult.value) {
-    emit('battleReport', {
-      attackerId: '',
-      attackerLabel: '',
-      targetId: '',
-      targetLabel: '',
-      damage: 0,
-    })
-  }
 }
 const triggerAttack = (targetId?: string) => {
   if (!selectedEntry) return
@@ -1819,6 +1477,7 @@ const triggerAttack = (targetId?: string) => {
       addAttackLine(selectedEntry, target)
       const aItem = findItemFromList(String(selectedEntry.id))
       const tItem = findItemFromList(targetId)
+      recordLockEvent(aItem, tItem)
       ElNotification({
         title: '目标锁定',
         message: `${aItem?.label || ''} 已锁定 ${tItem?.label || ''}，进入射程自动攻击`,
@@ -1836,20 +1495,11 @@ onUnmounted(() => {
   }
   heatMapInstance?.destory?.()
   heatMapInstance = null
-  if (windTickHandler && viewer) {
-    viewer.scene.preUpdate.removeEventListener(windTickHandler)
-    windTickHandler = null
-  }
+  windField.destroy(viewer)
   if (combatTickHandler && viewer) {
     viewer.clock.onTick.removeEventListener(combatTickHandler)
     combatTickHandler = null
   }
-  if (viewer) {
-    windEntityMap.forEach((_, id) => {
-      viewer!.entities.removeById(id)
-    })
-  }
-  windEntityMap.clear()
   radarScanStateMap.forEach((_, __) => { /* entity refs will be destroyed with viewer */ })
   radarScanStateMap.clear()
   // 清理战斗状态
@@ -1860,28 +1510,33 @@ onUnmounted(() => {
     window.removeEventListener('keydown', lockEscHandlerRef)
     lockEscHandlerRef = null
   }
+  if (moveEscHandlerRef) {
+    window.removeEventListener('keydown', moveEscHandlerRef)
+    moveEscHandlerRef = null
+  }
   if (viewer) {
     const canvas = viewer.scene.canvas
     handler?.destroy()
     canvas.removeEventListener('contextmenu', sceneContextmenu as any)
-    moveTrackMap.forEach(({ solidLineId, dashedLineId, tickHandler }) => {
+    moveTrackMap.forEach(({ solidLineId, dashedLineId }) => {
       viewer!.entities.removeById(solidLineId)
       viewer!.entities.removeById(dashedLineId)
-      viewer!.clock.onTick.removeEventListener(tickHandler)
     })
     moveTrackMap.clear()
     viewer.destroy()
     viewer = null
   }
 })
-const SPEED_OPTIONS = [1, 2, 5, 10, 30, 50, 100, 150, 300, 500, 1000, 1500, 3000, 6000]
-let entryStartJulian: Cesium.JulianDate | null = null
 function setSpeed(multiplier: number) {
   if (!viewer) return
-  const m = Number(multiplier)
-  viewer.clock.multiplier = (isFinite(m) && m > 0) ? m : 1
-  viewer.clock.shouldAnimate = true
+  simPaused = false
+  applyClockSpeed(viewer.clock, multiplier, false)
   viewer.useDefaultRenderLoop = true
+}
+function setPaused(paused: boolean) {
+  simPaused = paused
+  if (!viewer) return
+  applyClockPaused(viewer.clock, paused)
 }
 function getSpeed() {
   return viewer ? viewer.clock.multiplier : 1
@@ -1899,10 +1554,13 @@ function getCurrentTime() {
   return new Date()
 }
 function isWindReady() {
-  return !!windConfig.ready
+  return windField.isReady()
 }
 function getWindSource(): 'open-meteo' | 'mock' | null {
   return 'mock'
+}
+function resizeViewer() {
+  viewer?.resize()
 }
 
 defineExpose({
@@ -1914,12 +1572,14 @@ defineExpose({
   startRadarScan,
   toggleWindField,
   setSpeed,
+  setPaused,
   getSpeed,
   getStartTime,
   getCurrentTime,
   isWindReady,
   getWindSource,
   SPEED_OPTIONS,
+  resizeViewer,
 })
 
 /** 重置战斗：复活所有单位，清除爆炸与锁定，关闭结算 */
@@ -1927,6 +1587,9 @@ function resetBattle() {
   battleResult.value = null
   deadEntitySet.clear()
   lockStateMap.clear()
+  moveController.clear()
+  patrolController.clear()
+  resetBattleLog()
   bulletIdToMeta.forEach((_meta, bid) => {
     if (viewer) viewer!.entities.removeById(bid)
   })
@@ -1945,8 +1608,18 @@ function resetBattle() {
         ent.show = item.faction === 'hostile' ? false : true
         ent.__isSelectable = true
       }
+      registerLogUnit({
+        id: item.id,
+        label: item._invisibleLabel || item.label,
+        unitType: item.unitType,
+        faction: item.faction,
+        maxHp: item.maxHp,
+        hp: item.hp,
+      })
+      clearMoveTrackByEntityId(item.id)
     }
   }
+  if (viewer) patrolController.init(viewer, modelList.value || [])
   updateVisionVisibility(viewer?.clock.currentTime ?? Cesium.JulianDate.now())
   ElNotification({ title: '战斗重置', message: '所有单位状态已恢复', type: 'success' })
 }

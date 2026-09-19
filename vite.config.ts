@@ -1,7 +1,8 @@
 import vue from '@vitejs/plugin-vue';
 // import vueDevTools from 'vite-plugin-vue-devtools'
 import { resolve } from 'path';
-import { defineConfig, loadEnv, ConfigEnv } from 'vite';
+import { loadEnv, ConfigEnv } from 'vite';
+import { defineConfig } from 'vitest/config';
 import vueSetupExtend from 'vite-plugin-vue-setup-extend';
 import AutoImport from 'unplugin-auto-import/vite';
 import Components from 'unplugin-vue-components/vite';
@@ -98,7 +99,6 @@ export default defineConfig((mode) => {
           compact: true,
           manualChunks: {
             vue: ['vue', 'pinia'],
-            echarts: ['echarts'],
           },
         },
       },
@@ -124,6 +124,11 @@ export default defineConfig((mode) => {
       __INTLIFY_PROD_DEVTOOLS__: JSON.stringify(false),
       __VERSION__: JSON.stringify(process.env.npm_package_version),
       __NEXT_NAME__: JSON.stringify(process.env.npm_package_name),
+    },
+
+    test: {
+      environment: 'node',
+      include: ['src/**/*.spec.ts'],
     },
   };
 });

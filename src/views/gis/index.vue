@@ -15,6 +15,9 @@
       @selectedEntityByIdClick="selectedEntityByIdClick"
       @command="command"
     />
+    <event-log-panel v-show="isLogShow" :log="reportLog" @close="isLogShow = false" @clear="clearBattleReport" />
+    <div v-show="!isLogShow" class="log-reopen" @click="isLogShow = true">事件日志</div>
+    <button class="replay-entry" @click="goReplay">复盘回放</button>
     <control-panel
       :speed-options="speedOptions"
       :current-speed="currentSpeed"
@@ -27,7 +30,6 @@
       @toggle-wind="toggleWind"
       @change-weather="changeWeather"
     />
-    <battle-report v-if="reportLog.length" :log="reportLog" />
   </div>
 </template>
 
@@ -35,11 +37,17 @@
 import Scene from './components/scene.vue';
 import Work from './components/work.vue';
 import ControlPanel from './components/controlPanel.vue';
-import BattleReport from './components/battleReport.vue';
+import EventLogPanel from './components/eventLogPanel.vue';
+import type { BattleReportItem } from './components/battleReport.vue';
 import { buildForces, type ForceState } from '@/mock/forces';
+import { useRouter } from 'vue-router';
+
+defineOptions({ name: 'gis' })
 
 const dataList = ref(buildGroupedDataList());
 provide('dataList', dataList);
+const router = useRouter();
+const goReplay = () => router.push('/replay');
 
 function buildGroupedDataList() {
   const all = buildForces();
@@ -129,6 +137,7 @@ function buildGroupedDataList() {
 }
 
 const isWorkShow = ref(true);
+const isLogShow = ref(true);
 const workRef = ref();
 const cesiumRef = ref();
 
@@ -149,28 +158,35 @@ const command = (action: string) => {
   cesiumRef.value?.commandClick(action);
 };
 
-/** 战斗日志：5 秒内同一目标只记录首次（去重在 scene.vue 触发 */
-const reportLog = ref<Array<{ time: string; targetId: string; targetLabel: string; attackerId: string; attackerLabel: string; damage: number }>>([]);
+/** 战况：命中 5 秒内同一目标去重；击毁始终记录。友军伤亡与敌方战损都写入。 */
+const reportLog = ref<BattleReportItem[]>([]);
 const recentReportMap = new Map<string, number>();
 const onBattleReport = (ev: any) => {
-  const now = Date.now();
-  const dedupKey = `${ev.targetId}`;
-  const last = recentReportMap.get(dedupKey);
-  if (last && now - last < 5000) {
-    return;
+  if (!ev?.targetId) return;
+  const kind: BattleReportItem['kind'] = ev.kind === 'kill' ? 'kill' : 'hit';
+  if (kind === 'hit') {
+    const now = Date.now();
+    const last = recentReportMap.get(ev.targetId);
+    if (last && now - last < 5000) return;
+    recentReportMap.set(ev.targetId, now);
   }
-  recentReportMap.set(dedupKey, now);
   reportLog.value.unshift({
     time: new Date().toLocaleTimeString(),
     targetId: ev.targetId,
     targetLabel: ev.targetLabel,
-    attackerId: ev.attackerId,
-    attackerLabel: ev.attackerLabel,
-    damage: ev.damage,
+    targetFaction: ev.targetFaction === 'hostile' ? 'hostile' : 'friendly',
+    attackerId: ev.attackerId || '',
+    attackerLabel: ev.attackerLabel || '',
+    damage: ev.damage || 0,
+    kind,
   });
   if (reportLog.value.length > 50) {
     reportLog.value.length = 50;
   }
+};
+const clearBattleReport = () => {
+  reportLog.value = [];
+  recentReportMap.clear();
 };
 
 const onBattleUpdate = (_forces: ForceState[]) => {
@@ -189,6 +205,7 @@ let tickTimer: number | null = null
 
 const changeSpeed = (s: number) => {
   currentSpeed.value = s
+  cesiumRef.value?.setPaused?.(false)
   cesiumRef.value?.setSpeed(s)
 }
 const toggleWind = () => {
@@ -201,7 +218,6 @@ const changeWeather = (w: number) => {
 
 onMounted(() => {
   startTime.value = cesiumRef.value?.getStartTime?.() ?? new Date()
-  // 实时同步当前时间 + 风场就绪状态
   tickTimer = window.setInterval(() => {
     currentTime.value = cesiumRef.value?.getCurrentTime?.() ?? new Date()
     if (cesiumRef.value?.isWindReady?.()) {
@@ -209,6 +225,15 @@ onMounted(() => {
       windSource.value = cesiumRef.value?.getWindSource?.() ?? 'mock'
     }
   }, 500)
+})
+
+onActivated(() => {
+  cesiumRef.value?.setPaused?.(false)
+  nextTick(() => cesiumRef.value?.resizeViewer?.())
+})
+
+onDeactivated(() => {
+  cesiumRef.value?.setPaused?.(true)
 })
 
 onUnmounted(() => {
@@ -236,5 +261,46 @@ onUnmounted(() => {
   height: 118px;
   background: url('@/assets/images/left_arrow.png') center center / 100% 100% no-repeat;
   z-index: 2;
+}
+
+.log-reopen {
+  position: absolute;
+  left: 0;
+  bottom: 90px;
+  width: 28px;
+  padding: 16px 6px;
+  writing-mode: vertical-rl;
+  letter-spacing: 4px;
+  font-size: 13px;
+  color: #00e5ff;
+  background: rgba(0, 24, 56, 0.82);
+  border: 1px solid rgba(0, 142, 255, 0.45);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.replay-entry {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 6;
+  min-width: 120px;
+  height: 40px;
+  padding: 0 18px;
+  border: 1px solid rgba(0, 229, 255, 0.55);
+  background: rgba(0, 24, 56, 0.82);
+  color: #00e5ff;
+  font-size: 14px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  border-radius: 4px;
+  box-shadow: 0 0 16px rgba(0, 229, 255, 0.25);
+  backdrop-filter: blur(8px);
+  &:hover {
+    background: rgba(0, 229, 255, 0.18);
+    color: $white;
+  }
 }
 </style>

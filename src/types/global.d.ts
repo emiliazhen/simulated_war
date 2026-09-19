@@ -1,8 +1,6 @@
 // 申明外部 npm 插件模块
 declare module 'splitpanes';
-declare module 'js-cookie';
 declare module '@wangeditor/editor-for-vue';
-declare module 'qs';
 
 // 声明一个模块，防止引入文件时报错
 declare module '*.json';

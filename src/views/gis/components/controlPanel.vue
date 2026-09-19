@@ -22,6 +22,7 @@
           >
             <el-option v-for="s in speedOptions" :key="s" :value="s" :label="`${s}x`" />
           </el-select>
+          <span v-if="speedModel >= 1000" class="speed-hint">快进倍速，短途机动可能一闪而过</span>
         </div>
 
         <div class="form-item">
@@ -205,9 +206,16 @@ const currentTimeStr = computed(() => fmtTime(props.currentTime))
   }
 }
 
+.speed-hint {
+  margin-left: 8px;
+  font-size: 11px;
+  color: rgba(255, 210, 90, 0.9);
+  white-space: nowrap;
+}
+
 .expand-enter-active, .expand-leave-active { transition: opacity 0.18s, max-height 0.22s; overflow: hidden; }
 .expand-enter-from, .expand-leave-to { opacity: 0; max-height: 0; }
-.expand-enter-to, .expand-leave-from { opacity: 1; max-height: 80px; }
+.expand-enter-to, .expand-leave-from { opacity: 1; max-height: 120px; }
 </style>
 
 <style lang="scss">

@@ -4,6 +4,7 @@ import * as elementIcons from '@element-plus/icons-vue';
 import type { App } from 'vue';
 import pinia from '@/stores/index';
 import App from './App.vue';
+import router from '@/router';
 import { directive } from '@/directive';
 
 import ElementPlus from 'element-plus';
@@ -34,5 +35,6 @@ directive(app);
 registerElementIcons(app);
 app
   .use(pinia)
+  .use(router)
   .use(ElementPlus, { zIndex: 3000, locale: zhCn })
   .mount('#app');

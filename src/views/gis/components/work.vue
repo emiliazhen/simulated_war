@@ -23,7 +23,7 @@
               <span v-if="data.faction === 'hostile'" class="hostile-tag">敌对</span>
               <div v-else>
                 <svg-icon name="ele-LocationFilled" :size="16" @click.stop="flyToIdClick(data.id)" />
-                <el-dropdown trigger="click" placement="bottom-start" @command="command">
+                <el-dropdown trigger="click" placement="bottom-start" @command="(cmd: string) => command(cmd, data.id)">
                   <svg-icon name="ele-Flag" :size="16" />
                   <template #dropdown>
                     <el-dropdown-menu>
@@ -64,7 +64,8 @@ const nodeClick = ({ isGroup, id, faction }: { isGroup: boolean, id: string, fac
 const setTreeCheckedKey = (key: string) => {
   treeRef.value?.setCurrentKey(key)
 }
-const command = (action: string) => {
+const command = (action: string, id: string) => {
+  emit('selectedEntityByIdClick', id)
   emit('command', action)
 }
 defineExpose({
@@ -78,7 +79,8 @@ defineExpose({
   top: 80px;
   left: 60px;
   width: 320px;
-  height: 700px;
+  height: calc(100% - 80px - 280px);
+  min-height: 240px;
   z-index: 2;
 
   .common-card-content>div {
