@@ -1,7 +1,6 @@
 import vue from '@vitejs/plugin-vue';
-// import vueDevTools from 'vite-plugin-vue-devtools'
 import { resolve } from 'path';
-import { loadEnv, ConfigEnv } from 'vite';
+import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 import vueSetupExtend from 'vite-plugin-vue-setup-extend';
 import AutoImport from 'unplugin-auto-import/vite';
@@ -33,7 +32,6 @@ export default defineConfig((mode) => {
         // 执行icon name的格式
         symbolId: 'icon-[dir]-[name]',
       }),
-      // vueDevTools(), //开发辅助
       vueSetupExtend(), // setup语法糖增强插件
       AutoImport({
         resolvers: [ElementPlusResolver()], // ELMessageBox, ELMessage...
@@ -72,20 +70,6 @@ export default defineConfig((mode) => {
       port: 8070, // 服务器端口号
       open: env.VITE_OPEN === 'true', // 是否自动打开浏览器
       hmr: true, // 启用热更新
-      proxy: {
-        '/api/gen': {
-          //单体架构下特殊处理代码生成模块代理
-          target: env.VITE_IS_MICRO === 'true' ? env.VITE_ADMIN_PROXY_PATH : env.VITE_GEN_PROXY_PATH,
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api/, ''),
-        },
-        '/api': {
-          target: env.VITE_ADMIN_PROXY_PATH, // 目标服务器地址
-          ws: true, // 是否启用 WebSocket
-          changeOrigin: true, // 是否修改请求头中的 Origin 字段
-          rewrite: (path) => path.replace(/^\/api/, ''),
-        },
-      },
     },
 
     build: {
