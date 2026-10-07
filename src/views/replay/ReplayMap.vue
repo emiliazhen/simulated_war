@@ -4,6 +4,7 @@
 
 <script setup lang="ts">
 import * as Cesium from 'cesium'
+import { publicAsset } from '@/utils/publicAsset'
 import { buildForces, FACTION_THEME, type ForceState } from '@/mock/forces'
 import type { PlaybackEvent } from '@/sim/replayPlayback'
 import {
@@ -102,7 +103,7 @@ function initViewer() {
     shouldAnimate: false,
   })
   const imageryLayer = new Cesium.UrlTemplateImageryProvider({
-    url: '/tiles/{z}/{x}/{y}.png',
+    url: publicAsset('tiles/{z}/{x}/{y}.png'),
     maximumLevel: 17,
     tilingScheme: new Cesium.WebMercatorTilingScheme(),
   })
@@ -143,7 +144,7 @@ function addCity(title: string, lng: number, lat: number) {
     name: title,
     position: Cesium.Cartesian3.fromDegrees(lng, lat, 0),
     billboard: {
-      image: '/images/location_point.png',
+      image: publicAsset('images/location_point.png'),
       width: 18,
       height: 18,
       disableDepthTestDistance: Number.POSITIVE_INFINITY,
@@ -197,7 +198,7 @@ function addUnit(force: ForceState) {
       return cartesianOf(id, result)
     }, false),
     billboard: {
-      image: `/images/${icon}.png`,
+      image: publicAsset(`images/${icon}.png`),
       width: 30,
       height: 30,
       disableDepthTestDistance: Number.POSITIVE_INFINITY,

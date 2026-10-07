@@ -21,6 +21,7 @@ declare module '*.vue' {
 /* eslint-disable */
 declare interface Window {
 	nextLoading: boolean;
+	CESIUM_BASE_URL?: string;
 }
 
 // 声明路由当前项类型

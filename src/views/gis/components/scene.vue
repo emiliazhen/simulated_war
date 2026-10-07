@@ -24,7 +24,7 @@
     </div>
     <div class="common-card-content">
       <div class="avatar"
-        :style="`background-image: url(/models/avatar/${model3dInfoMap[entryInfoObjet.infoData.unitType]?.source || 'fight_plane'}.jpg)`">
+        :style="`background-image: url(${publicAsset(`models/avatar/${model3dInfoMap[entryInfoObjet.infoData.unitType]?.source || 'fight_plane'}.jpg`)})`">
       </div>
       <el-descriptions :column="1" border :label-width="designPxToRealPx(80)">
         <el-descriptions-item label="名称">
@@ -64,6 +64,7 @@ import * as Cesium from 'cesium';
 import { ElNotification } from 'element-plus';
 import HeatMap from '@/utils/heatmap.js'
 import { toFixed } from '@/utils/index'
+import { publicAsset } from '@/utils/publicAsset'
 import { useRem } from '@/hooks/rem'
 import { FACTION_THEME } from '@/mock/forces'
 import { applyClockPaused, applyClockSpeed, initSimClock, simSeconds as clockSimSeconds, SPEED_OPTIONS } from '@/sim/clock'
@@ -195,7 +196,7 @@ onMounted(() => {
     selectionIndicator: false,
   });
   const imageryLayer = new Cesium.UrlTemplateImageryProvider({
-    url: '/tiles/{z}/{x}/{y}.png',
+    url: publicAsset('tiles/{z}/{x}/{y}.png'),
     maximumLevel: 17,
     tilingScheme: new Cesium.WebMercatorTilingScheme(),
   });
@@ -422,7 +423,7 @@ const addMainPoint = (title: string, lng: number, lat: number) => {
     name: title,
     position: Cesium.Cartesian3.fromDegrees(lng, lat, 0),
     billboard: {
-      image: '/images/location_point.png',
+      image: publicAsset('images/location_point.png'),
       width: 20,
       height: 20,
       verticalOrigin: Cesium.VerticalOrigin.CENTER,
@@ -546,7 +547,7 @@ const addUnit = (data: any, lng: number, lat: number, height: number) => {
     name: data.label,
     position: Cesium.Cartesian3.fromDegrees(lng, lat, height),
     billboard: {
-      image: `/images/${source}.png`,
+      image: publicAsset(`images/${source}.png`),
       width: 30,
       height: 30,
       verticalOrigin: Cesium.VerticalOrigin.CENTER,

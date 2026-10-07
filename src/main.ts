@@ -14,9 +14,12 @@ import 'element-plus/theme-chalk/dark/css-vars.css';
 import 'virtual:svg-icons-register';
 
 import { Pagination } from '@/components/index';
+import { publicAsset } from '@/utils/publicAsset';
+import { initRem } from '@/utils/flexible.js';
+
+window.CESIUM_BASE_URL = publicAsset('cesium/');
 
 // 根据屏幕调整根字体大小
-import { initRem } from '@/utils/flexible.js';
 initRem();
 
 // 注册 element-plus 图标为 ele-<Name> 全局组件

@@ -1,9 +1,6 @@
-/*  初始化样式 */
-@import 'font.scss';
-@import 'reboot.scss';
-/*  element-plus样式 */
-@import 'elementPlusVar.scss';
-@import 'elementPlusStyle.scss';
-@import 'transition.scss';
-/*  通用样式 */
-@import 'common.scss';
+@use 'font';
+@use 'reboot';
+@use 'elementPlusVar';
+@use 'elementPlusStyle';
+@use 'transition';
+@use 'common';

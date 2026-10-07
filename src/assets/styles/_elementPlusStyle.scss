@@ -1,3 +1,6 @@
+@use 'sass:color';
+@use 'variables' as *;
+
 .el-main {
   overflow: unset;
   padding: 0;
@@ -78,15 +81,6 @@
       background-color: unset;
       border: none;
       box-shadow: none;
-      &.el-button--primary {
-        background: url('@/assets/images/button_short.png') center center / 100% 100% no-repeat;
-      }
-      &:not(.el-button--primary) {
-        background: url('@/assets/images/button_cancel.png') center center / 100% 100% no-repeat;
-        &:hover {
-          color: $white;
-        }
-      }
     }
   }
   .el-dialog__headerbtn {
@@ -104,7 +98,7 @@
       }
     }
     &:hover .el-dialog__close {
-      border-color: darken($color: $primary, $amount: 30%);
+      border-color: color.adjust($primary, $lightness: -30%);
       color: $primary;
     }
   }
@@ -182,7 +176,7 @@
         }
       }
       &:hover .el-message-box__close {
-        border-color: darken($color: $primary, $amount: 30%);
+        border-color: color.adjust($primary, $lightness: -30%);
         color: $primary;
       }
     }
@@ -203,15 +197,6 @@
       background-color: unset;
       border: none;
       box-shadow: none;
-      &.el-button--primary {
-        background: url('@/assets/images/button_short.png') center center / 100% 100% no-repeat;
-      }
-      &:not(.el-button--primary) {
-        background: url('@/assets/images/button_cancel.png') center center / 100% 100% no-repeat;
-        &:hover {
-          color: $white;
-        }
-      }
     }
     .el-message-box__content {
       padding-top: 30px;
@@ -645,101 +630,6 @@
   .el-select__placeholder {
     font-size: 16px;
     color: $white;
-  }
-}
-.el-popper {
-  font-size: 16px !important;
-  &.el-dropdown__popper,
-  &.el-select__popper {
-    border: none !important;
-    background: unset !important;
-    .el-popper__arrow {
-      display: none;
-    }
-  }
-  .el-select-dropdown__wrap,
-  .el-dropdown-menu {
-    padding: 2px 0 !important;
-    background: rgba(#002052, 0.8) !important;
-    backdrop-filter: blur(5px);
-    .el-select-dropdown__item,
-    .el-dropdown-menu__item {
-      color: $white;
-      margin: 5px;
-      border-radius: 7px;
-      font-size: 16px;
-      &:not(.is-disabled).is-hovering,
-      &:not(.is-disabled):focus,
-      &:not(.is-disabled):hover {
-        background-color: $primary !important;
-        color: $white !important;
-      }
-    }
-  }
-}
-.el-popover {
-  border: none !important;
-  &.app-menu-popover {
-    background-color: #002348 !important;
-    padding: 0 !important;
-    .el-popper__arrow {
-      display: none;
-    }
-    &::before,
-    &::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      width: 94px;
-      height: 149px;
-    }
-    &::before {
-      left: -94px;
-      background: #002348 url('@/assets/images/menu_left.png') center center / 100% 100% no-repeat;
-      clip-path: polygon(
-        -1px 35px,
-        35px -1px,
-        calc(100% + 1px) -1px,
-        calc(100% + 1px) calc(100% + 1px),
-        35px calc(100% + 1px),
-        -1px calc(100% - 35px)
-      );
-    }
-    &::after {
-      right: -94px;
-      background: #002348 url('@/assets/images/menu_right.png') center center / 100% 100% no-repeat;
-      clip-path: polygon(
-        -1px -1px,
-        calc(100% - 35px) -1px,
-        calc(100% + 1px) 35px,
-        calc(100% + 1px) calc(100% - 35px),
-        calc(100% - 35px) calc(100% + 1px),
-        -1px calc(100% + 1px)
-      );
-    }
-  }
-  &.control-menu-popover {
-    padding: 2px 0 !important;
-    background: rgba(#002052, 0.8) !important;
-    backdrop-filter: blur(5px);
-    .el-popper__arrow:before {
-      background-color: rgba(#002052, 0.8) !important;
-    }
-    ul {
-      padding: 5px;
-      > li {
-        cursor: pointer;
-        color: $white;
-        margin: 5px;
-        border-radius: 7px;
-        font-size: 16px;
-        line-height: 30px;
-        padding: 0 10px;
-        &:hover {
-          background-color: $primary;
-        }
-      }
-    }
   }
 }
 .el-transfer {

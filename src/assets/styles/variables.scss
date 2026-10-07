@@ -1,3 +1,4 @@
+@use 'sass:color';
 @use 'sass:math';
 $white: #fff !default;
 $gray-100: #f8f9fa !default;
@@ -90,7 +91,7 @@ $h6-font-size: $font-size-base !default;
 // 链接
 $link-color: $primary !default;
 $link-decoration: none !default;
-$link-hover-color: darken($link-color, 15%) !default;
+$link-hover-color: color.adjust($link-color, $lightness: -15%) !default;
 $link-hover-decoration: underline !default;
 
 // body

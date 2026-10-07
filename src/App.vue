@@ -12,7 +12,7 @@
 </script>
 
 <style lang="scss">
-@import '@/assets/styles/index.scss';
+@use '@/assets/styles/index.scss';
 
 #app {
   height: 100%;

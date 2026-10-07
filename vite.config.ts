@@ -98,7 +98,12 @@ export default defineConfig((mode) => {
     css: {
       preprocessorOptions: {
         scss: {
-          additionalData: `@import "@/assets/styles/variables.scss";`,
+          quietDeps: true,
+          additionalData: (source: string, filename: string) => {
+            const normalized = filename.replace(/\\/g, '/');
+            if (normalized.includes('/src/assets/styles/')) return source;
+            return `@use "@/assets/styles/variables.scss" as *;\n${source}`;
+          },
         },
         css: { charset: false },
       },

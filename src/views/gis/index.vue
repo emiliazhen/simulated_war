@@ -1,11 +1,6 @@
 <template>
   <div class="gis-wrap">
-    <scene
-      ref="cesiumRef"
-      @selectedEntityChange="selectedEntityChange"
-      @battleUpdate="onBattleUpdate"
-      @battleReport="onBattleReport"
-    />
+    <scene ref="cesiumRef" @selectedEntityChange="selectedEntityChange" @battleUpdate="onBattleUpdate" @battleReport="onBattleReport" />
     <div class="left-arrow-wrap" @click="leftArrowClick"></div>
     <work
       v-show="isWorkShow"
@@ -42,7 +37,7 @@ import type { BattleReportItem } from './components/battleReport.vue';
 import { buildForces, type ForceState } from '@/mock/forces';
 import { useRouter } from 'vue-router';
 
-defineOptions({ name: 'gis' })
+defineOptions({ name: 'gis' });
 
 const dataList = ref(buildGroupedDataList());
 provide('dataList', dataList);
@@ -58,7 +53,7 @@ function buildGroupedDataList() {
     AIRCRAFT: '飞机',
     UAV: '无人机',
     GROUND: '坦克',
-  }
+  };
   const toFriendly = (list: ForceState[]) =>
     list.map((f) => ({
       id: f.id,
@@ -95,10 +90,8 @@ function buildGroupedDataList() {
     list.map((f) => {
       // 敌对条目默认显示 "单位-HXX" 出现后在友军视野中变为 "类型-HXX"
       // 例：label "单位-H04" → visibleLabel "飞机-H04"
-      const origSuffix = /^单位-(.+)$/.exec(f.label)?.[1] ?? ''
-      const visibleLabel = origSuffix
-        ? `${TYPE_CN_FOR_LABEL[f.unitType] || '单位'}-${origSuffix}`
-        : f.label
+      const origSuffix = /^单位-(.+)$/.exec(f.label)?.[1] ?? '';
+      const visibleLabel = origSuffix ? `${TYPE_CN_FOR_LABEL[f.unitType] || '单位'}-${origSuffix}` : f.label;
       return {
         id: f.id,
         label: f.label, // 初始默认显示原始 "单位-HXX"
@@ -194,54 +187,54 @@ const onBattleUpdate = (_forces: ForceState[]) => {
 };
 
 /** ===== 控制面板状态 ===== */
-const speedOptions: number[] = [1, 2, 5, 10, 30, 50, 100, 150, 300, 500, 1000, 1500, 3000, 6000]
-const currentSpeed = ref(1)
-const windOn = ref(true)
-const windReady = ref(false)
-const windSource = ref<'open-meteo' | 'mock' | null>(null)
-const startTime = ref(new Date())
-const currentTime = ref(new Date())
-let tickTimer: number | null = null
+const speedOptions: number[] = [1, 2, 5, 10, 30, 50, 100, 150, 300, 500, 1000, 1500, 3000, 6000];
+const currentSpeed = ref(1);
+const windOn = ref(true);
+const windReady = ref(false);
+const windSource = ref<'open-meteo' | 'mock' | null>(null);
+const startTime = ref(new Date());
+const currentTime = ref(new Date());
+let tickTimer: number | null = null;
 
 const changeSpeed = (s: number) => {
-  currentSpeed.value = s
-  cesiumRef.value?.setPaused?.(false)
-  cesiumRef.value?.setSpeed(s)
-}
+  currentSpeed.value = s;
+  cesiumRef.value?.setPaused?.(false);
+  cesiumRef.value?.setSpeed(s);
+};
 const toggleWind = () => {
-  windOn.value = !windOn.value
-  cesiumRef.value?.toggleWindField(windOn.value)
-}
+  windOn.value = !windOn.value;
+  cesiumRef.value?.toggleWindField(windOn.value);
+};
 const changeWeather = (w: number) => {
-  cesiumRef.value?.changeWeather(w)
-}
+  cesiumRef.value?.changeWeather(w);
+};
 
 onMounted(() => {
-  startTime.value = cesiumRef.value?.getStartTime?.() ?? new Date()
+  startTime.value = cesiumRef.value?.getStartTime?.() ?? new Date();
   tickTimer = window.setInterval(() => {
-    currentTime.value = cesiumRef.value?.getCurrentTime?.() ?? new Date()
+    currentTime.value = cesiumRef.value?.getCurrentTime?.() ?? new Date();
     if (cesiumRef.value?.isWindReady?.()) {
-      windReady.value = true
-      windSource.value = cesiumRef.value?.getWindSource?.() ?? 'mock'
+      windReady.value = true;
+      windSource.value = cesiumRef.value?.getWindSource?.() ?? 'mock';
     }
-  }, 500)
-})
+  }, 500);
+});
 
 onActivated(() => {
-  cesiumRef.value?.setPaused?.(false)
-  nextTick(() => cesiumRef.value?.resizeViewer?.())
-})
+  cesiumRef.value?.setPaused?.(false);
+  nextTick(() => cesiumRef.value?.resizeViewer?.());
+});
 
 onDeactivated(() => {
-  cesiumRef.value?.setPaused?.(true)
-})
+  cesiumRef.value?.setPaused?.(true);
+});
 
 onUnmounted(() => {
   if (tickTimer) {
-    clearInterval(tickTimer)
-    tickTimer = null
+    clearInterval(tickTimer);
+    tickTimer = null;
   }
-})
+});
 </script>
 
 <style lang="scss" scoped>
